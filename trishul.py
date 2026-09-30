@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 
 import argparse
+import json
 import sys
+import uuid
 from dataclasses import dataclass, field
-from typing import Any, List, Optional
+from datetime import datetime
+from typing import Any, Callable, Dict, List, Optional
 
 
 class TrishulError(Exception):
@@ -31,6 +34,144 @@ class ContinueSignal(Exception):
 class Token:
     type: str
     value: Any = None
+
+
+@dataclass
+class Component:
+    name: str
+    properties: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self):
+        return {"name": self.name, "properties": self.properties}
+
+
+@dataclass
+class Entity:
+    id: str
+    name: str
+    state: Dict[str, Any] = field(default_factory=dict)
+    components: Dict[str, Component] = field(default_factory=dict)
+    active: bool = True
+
+    def add_component(self, component: Component):
+        self.components[component.name] = component
+
+    def get_component(self, name: str):
+        return self.components.get(name)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "name": self.name,
+            "active": self.active,
+            "components": {name: comp.to_dict() for name, comp in self.components.items()},
+            "state": self.state,
+        }
+
+
+@dataclass
+class GameEvent:
+    id: str
+    event_type: str
+    entity_id: str
+    timestamp: float
+    data: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "event_type": self.event_type,
+            "entity_id": self.entity_id,
+            "timestamp": self.timestamp,
+            "data": self.data,
+        }
+
+
+class GameState:
+    def __init__(self):
+        self.entities: Dict[str, Entity] = {}
+        self.events: List[GameEvent] = []
+        self.global_state: Dict[str, Any] = {}
+
+    def create_entity(self, name: str, initial_state: Optional[Dict[str, Any]] = None) -> Entity:
+        entity_id = str(uuid.uuid4())
+        entity = Entity(id=entity_id, name=name, state=initial_state or {})
+        self.entities[entity_id] = entity
+        self.events.append(
+            GameEvent(
+                id=str(uuid.uuid4()),
+                event_type="entity_created",
+                entity_id=entity_id,
+                timestamp=datetime.now().timestamp(),
+                data={"name": name},
+            )
+        )
+        return entity
+
+    def get_entity_by_name(self, name: str) -> Optional[Entity]:
+        for entity in self.entities.values():
+            if entity.name == name:
+                return entity
+        return None
+
+    def get_entity(self, entity_id: str) -> Optional[Entity]:
+        return self.entities.get(entity_id)
+
+    def add_component(self, entity_id: str, component_name: str, properties: Dict[str, Any]):
+        entity = self.get_entity(entity_id)
+        if entity is None:
+            raise TrishulError(f"Entity '{entity_id}' not found")
+        entity.add_component(Component(component_name, properties))
+        self.events.append(
+            GameEvent(
+                id=str(uuid.uuid4()),
+                event_type="component_added",
+                entity_id=entity_id,
+                timestamp=datetime.now().timestamp(),
+                data={"component": component_name, "properties": properties},
+            )
+        )
+
+    def update_state(self, entity_id: str, state_update: Dict[str, Any]):
+        entity = self.get_entity(entity_id)
+        if entity is None:
+            raise TrishulError(f"Entity '{entity_id}' not found")
+        entity.state.update(state_update)
+        self.events.append(
+            GameEvent(
+                id=str(uuid.uuid4()),
+                event_type="state_changed",
+                entity_id=entity_id,
+                timestamp=datetime.now().timestamp(),
+                data=state_update,
+            )
+        )
+
+    def trigger_action(self, entity_id: str, action_name: str, params: Dict[str, Any]):
+        entity = self.get_entity(entity_id)
+        if entity is None:
+            raise TrishulError(f"Entity '{entity_id}' not found")
+        self.events.append(
+            GameEvent(
+                id=str(uuid.uuid4()),
+                event_type="action_triggered",
+                entity_id=entity_id,
+                timestamp=datetime.now().timestamp(),
+                data={"action": action_name, "params": params},
+            )
+        )
+
+    def export_json(self, out_path: str):
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "entities": {entity_id: entity.to_dict() for entity_id, entity in self.entities.items()},
+                    "events": [event.to_dict() for event in self.events],
+                    "global_state": self.global_state,
+                },
+                f,
+                indent=2,
+            )
 
 
 @dataclass
@@ -98,16 +239,6 @@ class While:
 
 
 @dataclass
-class For:
-    var: str
-    start: Any
-    end: Any
-    step: Any
-    body: List["Stmt"]
-    max_iterations: int = 10000
-
-
-@dataclass
 class Break:
     pass
 
@@ -122,6 +253,32 @@ class FunctionDef:
     name: str
     params: List[str]
     body: List["Stmt"]
+
+
+@dataclass
+class EntityCreate:
+    name: Any
+    initial_state: Optional[Dict[str, Any]]
+
+
+@dataclass
+class ComponentAdd:
+    entity_ref: Any
+    component_name: Any
+    properties: Optional[Dict[str, Any]]
+
+
+@dataclass
+class StateUpdate:
+    entity_ref: Any
+    state_changes: Any
+
+
+@dataclass
+class ActionTrigger:
+    entity_ref: Any
+    action_name: Any
+    params: Any
 
 
 @dataclass
@@ -140,10 +297,6 @@ KEYWORDS = {
     "to": "TO",
     "warna": "WARNA",
     "jabtak": "JABTAK",
-    "ke_liye": "FOR",
-    "se": "FROM",
-    "tak": "UNTIL",
-    "tak_badhte_hue": "UNTIL_STEP",
     "kaam": "KAAM",
     "khatam": "KHATAM",
     "wapis": "WAPIS",
@@ -153,6 +306,13 @@ KEYWORDS = {
     "ya": "OR",
     "tod_do": "BREAK",
     "agle": "CONTINUE",
+    "entity": "ENTITY",
+    "banao": "CREATE",
+    "component": "COMPONENT",
+    "add_karo": "ADD_COMPONENT",
+    "state_badlo": "UPDATE_STATE",
+    "action": "ACTION",
+    "trigger_karo": "TRIGGER_ACTION",
 }
 
 
@@ -178,7 +338,7 @@ def tokenize(source: str) -> List[Token]:
                 if source[i] == '\\':
                     i += 1
                     if i >= len(source):
-                        raise TrishulError("Dangling escape in string.")
+                        raise TrishulError("Dangling escape in string literal")
                     esc = source[i]
                     mapping = {'n': '\n', 't': '\t', '"': '"', "'": "'", '\\': '\\'}
                     value += mapping.get(esc, esc)
@@ -190,24 +350,24 @@ def tokenize(source: str) -> List[Token]:
                 value += source[i]
                 i += 1
             else:
-                raise TrishulError("Unterminated string literal.")
+                raise TrishulError("Unterminated string literal")
             tokens.append(Token("STRING", value))
             continue
 
         if ch.isdigit() or (ch == '.' and i + 1 < len(source) and source[i + 1].isdigit()):
             start = i
-            dot_count = 0
+            has_dot = False
             while i < len(source) and (source[i].isdigit() or source[i] == '.'):
                 if source[i] == '.':
-                    dot_count += 1
-                    if dot_count > 1:
+                    if has_dot:
                         break
+                    has_dot = True
                 i += 1
-            num_text = source[start:i]
+            text = source[start:i]
             try:
-                value = int(num_text)
+                value = int(text)
             except ValueError:
-                value = float(num_text)
+                value = float(text)
             tokens.append(Token("NUMBER", value))
             continue
 
@@ -221,7 +381,7 @@ def tokenize(source: str) -> List[Token]:
             tokens.append(Token(token_type, word))
             continue
 
-        if ch in "{}(),;":
+        if ch in "{}(),;:":
             tokens.append(Token(ch, ch))
             i += 1
             continue
@@ -237,7 +397,7 @@ def tokenize(source: str) -> List[Token]:
                 i += 2
                 continue
             if ch == '=':
-                raise TrishulError("Assignment uses 'ko ... rakho', not '='.")
+                raise TrishulError("Assignment uses 'ko ... rakho', not '='")
             tokens.append(Token(ch, ch))
             i += 1
             continue
@@ -268,15 +428,15 @@ class Parser:
             self.index += 1
         return token
 
-    def match(self, *token_types: str) -> Optional[Token]:
-        if self.current().type in token_types:
+    def match(self, *types: str) -> Optional[Token]:
+        if self.current().type in types:
             return self.advance()
         return None
 
     def expect(self, token_type: str) -> Token:
         token = self.current()
         if token.type != token_type:
-            raise TrishulError(f"Expected {token_type!r}, found {token.type!r}.")
+            raise TrishulError(f"Expected {token_type!r}, found {token.type!r}")
         self.index += 1
         return token
 
@@ -290,16 +450,65 @@ class Parser:
 
     def parse_block(self) -> List[Stmt]:
         self.expect("{")
-        statements: List[Stmt] = []
+        stmts: List[Stmt] = []
         while self.current().type != "}":
             if self.current().type == "EOF":
-                raise TrishulError("Missing closing '}' for block.")
-            statements.append(self.parse_statement())
+                raise TrishulError("Missing closing '}'")
+            stmts.append(self.parse_statement())
         self.expect("}")
-        return statements
+        return stmts
+
+    def parse_object_literal(self) -> Dict[str, Any]:
+        obj: Dict[str, Any] = {}
+        self.expect("{")
+        while self.current().type != "}":
+            key = self.expect("IDENT").value
+            self.expect(":")
+            value = self.parse_expression()
+            obj[key] = value
+            if not self.match(","):
+                break
+        self.expect("}")
+        return obj
 
     def parse_statement(self) -> Stmt:
         token = self.current()
+
+        if token.type == "ENTITY":
+            self.advance()
+            self.expect("CREATE")
+            name_expr = self.parse_expression()
+            init_state = None
+            if self.current().type == "{":
+                init_state = self.parse_object_literal()
+            return EntityCreate(name_expr, init_state)
+
+        if token.type == "COMPONENT":
+            self.advance()
+            self.expect("ADD_COMPONENT")
+            entity_ref = self.parse_expression()
+            self.expect(":")
+            comp_name = self.expect("IDENT").value
+            props = self.parse_object_literal() if self.current().type == "{" else {}
+            return ComponentAdd(entity_ref, comp_name, props)
+
+        if token.type == "ACTION":
+            self.advance()
+            self.expect("TRIGGER_ACTION")
+            entity_ref = self.parse_expression()
+            self.expect(":")
+            action_name = self.expect("IDENT").value
+            params = self.parse_object_literal() if self.current().type == "{" else {}
+            return ActionTrigger(entity_ref, action_name, params)
+
+        if token.type == "UPDATE_STATE":
+            self.advance()
+            entity_ref = self.parse_expression()
+            if self.current().type == "{":
+                state_changes = self.parse_object_literal()
+            else:
+                state_changes = {}
+            return StateUpdate(entity_ref, state_changes)
 
         if token.type == "AGAR":
             self.advance()
@@ -317,20 +526,6 @@ class Parser:
             self.expect("TO")
             body = self.parse_block()
             return While(condition, body, max_iterations=10000)
-
-        if token.type == "FOR":
-            self.advance()
-            var = self.expect("IDENT").value
-            self.expect("FROM")
-            start = self.parse_expression()
-            self.expect("UNTIL")
-            end = self.parse_expression()
-            step = Literal(1)
-            if self.match("UNTIL_STEP"):
-                step = self.parse_expression()
-            self.expect("TO")
-            body = self.parse_block()
-            return For(var, start, end, step, body, max_iterations=10000)
 
         if token.type == "BREAK":
             self.advance()
@@ -363,12 +558,10 @@ class Parser:
             return Assign(name, value)
 
         expr = self.parse_expression()
-
         if self.match("LIKHO"):
             return Print(expr)
         if self.match("WAPIS"):
             return Return(expr)
-
         return ExprStmt(expr)
 
     def parse_expression(self) -> Any:
@@ -432,19 +625,15 @@ class Parser:
         if token.type == "NUMBER":
             self.advance()
             return Literal(token.value)
-
         if token.type == "STRING":
             self.advance()
             return Literal(token.value)
-
         if token.type == "TRUE":
             self.advance()
             return Literal(True)
-
         if token.type == "FALSE":
             self.advance()
             return Literal(False)
-
         if token.type == "IDENT":
             name = self.advance().value
             if self.match("("):
@@ -457,7 +646,16 @@ class Parser:
                 self.expect(")")
                 return Call(Name(name), args)
             return Name(name)
-
+        if self.match("{"):
+            obj: Dict[str, Any] = {}
+            while self.current().type != "}":
+                key = self.expect("IDENT").value
+                self.expect(":")
+                obj[key] = self.parse_expression()
+                if not self.match(","):
+                    break
+            self.expect("}")
+            return obj
         if self.match("("):
             expr = self.parse_expression()
             self.expect(")")
@@ -467,7 +665,7 @@ class Parser:
 
 
 class FunctionValue:
-    def __init__(self, name: str, params: List[str], body: List[Stmt], closure: dict):
+    def __init__(self, name: str, params: List[str], body: List[Stmt], closure: Dict[str, Any]):
         self.name = name
         self.params = params
         self.body = body
@@ -475,8 +673,9 @@ class FunctionValue:
 
 
 class Interpreter:
-    def __init__(self, max_loop_iterations: int = 10000):
-        self.globals = {}
+    def __init__(self, game_state: GameState, max_loop_iterations: int = 10000):
+        self.game_state = game_state
+        self.globals: Dict[str, Any] = {}
         self.max_loop_iterations = max_loop_iterations
 
     def execute_program(self, program: Program):
@@ -485,11 +684,49 @@ class Interpreter:
             self.execute_statement(stmt, env)
         return env
 
-    def execute_block(self, statements: List[Stmt], env: dict):
+    def execute_block(self, statements: List[Stmt], env: Dict[str, Any]):
         for stmt in statements:
             self.execute_statement(stmt, env)
 
-    def execute_statement(self, stmt: Stmt, env: dict):
+    def resolve_entity_ref(self, expr: Any, env: Dict[str, Any]) -> str:
+        value = self.eval_expr(expr, env)
+        if isinstance(value, Entity):
+            return value.id
+        if isinstance(value, str):
+            entity = self.game_state.get_entity_by_name(value)
+            if entity:
+                return entity.id
+            return value
+        raise TrishulError(f"Unsupported entity reference: {value!r}")
+
+    def execute_statement(self, stmt: Stmt, env: Dict[str, Any]):
+        if isinstance(stmt, EntityCreate):
+            name = self.eval_expr(stmt.name, env)
+            initial_state = self.eval_expr(stmt.initial_state, env) if stmt.initial_state is not None else {}
+            entity = self.game_state.create_entity(name, initial_state)
+            env[name] = entity
+            return None
+
+        if isinstance(stmt, ComponentAdd):
+            entity_id = self.resolve_entity_ref(stmt.entity_ref, env)
+            comp_name = self.eval_expr(stmt.component_name, env) if isinstance(stmt.component_name, Name) else stmt.component_name
+            props = self.eval_expr(stmt.properties, env) if stmt.properties is not None else {}
+            self.game_state.add_component(entity_id, comp_name, props)
+            return None
+
+        if isinstance(stmt, StateUpdate):
+            entity_id = self.resolve_entity_ref(stmt.entity_ref, env)
+            state_changes = self.eval_expr(stmt.state_changes, env) if stmt.state_changes is not None else {}
+            self.game_state.update_state(entity_id, state_changes)
+            return None
+
+        if isinstance(stmt, ActionTrigger):
+            entity_id = self.resolve_entity_ref(stmt.entity_ref, env)
+            action_name = self.eval_expr(stmt.action_name, env) if isinstance(stmt.action_name, Name) else stmt.action_name
+            params = self.eval_expr(stmt.params, env) if stmt.params is not None else {}
+            self.game_state.trigger_action(entity_id, action_name, params)
+            return None
+
         if isinstance(stmt, Assign):
             env[stmt.name] = self.eval_expr(stmt.value, env)
             return None
@@ -519,43 +756,13 @@ class Interpreter:
             while self.is_truthy(self.eval_expr(stmt.condition, env)):
                 iterations += 1
                 if iterations > self.max_loop_iterations:
-                    raise LoopLimitExceeded(
-                        f"While loop exceeded maximum iterations ({self.max_loop_iterations})"
-                    )
+                    raise LoopLimitExceeded(f"While loop exceeded maximum iterations ({self.max_loop_iterations})")
                 try:
                     self.execute_block(stmt.body, env)
                 except BreakSignal:
                     break
                 except ContinueSignal:
                     continue
-            return None
-
-        if isinstance(stmt, For):
-            start_val = self.eval_expr(stmt.start, env)
-            end_val = self.eval_expr(stmt.end, env)
-            step_val = self.eval_expr(stmt.step, env)
-
-            if step_val == 0:
-                raise TrishulError("For loop step cannot be zero (anant loop ka khatra)")
-            
-            iterations = 0
-            current = start_val
-            
-            while (step_val > 0 and current < end_val) or (step_val < 0 and current > end_val):
-                iterations += 1
-                if iterations > self.max_loop_iterations:
-                    raise LoopLimitExceeded(
-                        f"For loop exceeded maximum iterations ({self.max_loop_iterations})"
-                    )
-                env[stmt.var] = current
-                try:
-                    self.execute_block(stmt.body, env)
-                except BreakSignal:
-                    break
-                except ContinueSignal:
-                    pass
-                current += step_val
-            
             return None
 
         if isinstance(stmt, FunctionDef):
@@ -568,7 +775,13 @@ class Interpreter:
 
         raise TrishulError(f"Unsupported statement type: {type(stmt).__name__}")
 
-    def eval_expr(self, expr: Any, env: dict):
+    def eval_expr(self, expr: Any, env: Dict[str, Any]):
+        if expr is None:
+            return None
+
+        if isinstance(expr, dict):
+            return {key: self.eval_expr(value, env) for key, value in expr.items()}
+
         if isinstance(expr, Literal):
             return expr.value
 
@@ -589,7 +802,6 @@ class Interpreter:
             left = self.eval_expr(expr.left, env)
             right = self.eval_expr(expr.right, env)
             op = expr.op
-
             if op == 'and':
                 return bool(left) and bool(right)
             if op == 'or':
@@ -602,11 +814,11 @@ class Interpreter:
                 return left * right
             if op == '/':
                 if right == 0:
-                    raise TrishulError("Division by zero (shunya se bhag nahi hota)")
+                    raise TrishulError("Division by zero")
                 return left / right
             if op == '%':
                 if right == 0:
-                    raise TrishulError("Modulo by zero (shunya se bhag nahi hota)")
+                    raise TrishulError("Modulo by zero")
                 return left % right
             if op == '==':
                 return left == right
@@ -625,14 +837,12 @@ class Interpreter:
         if isinstance(expr, Call):
             callee = self.eval_expr(expr.callee, env)
             if not isinstance(callee, FunctionValue):
-                raise TrishulError("Only Trishul functions can be called.")
+                raise TrishulError("Only Trishul functions can be called")
             if len(expr.args) != len(callee.params):
-                raise TrishulError(f"Function {callee.name} expected {len(callee.params)} args, got {len(expr.args)}.")
-
+                raise TrishulError(f"Function {callee.name} expected {len(callee.params)} args, got {len(expr.args)}")
             local_env = dict(callee.closure)
             for param, arg in zip(callee.params, expr.args):
                 local_env[param] = self.eval_expr(arg, env)
-
             try:
                 for stmt in callee.body:
                     self.execute_statement(stmt, local_env)
@@ -640,116 +850,11 @@ class Interpreter:
                 return sig.value
             return None
 
-        raise TrishulError(f"Unsupported expression node: {type(expr).__name__}")
+        return expr
 
     @staticmethod
     def is_truthy(value):
         return bool(value)
-
-
-class PythonCompiler:
-    def __init__(self):
-        self.op_map = {
-            '+': '+',
-            '-': '-',
-            '*': '*',
-            '/': '/',
-            '%': '%',
-            '==': '==',
-            '!=': '!=',
-            '<': '<',
-            '>': '>',
-            '<=': '<=',
-            '>=': '>=',
-            'and': 'and',
-            'or': 'or',
-        }
-
-    def compile_program(self, program: Program) -> str:
-        lines: List[str] = []
-        for stmt in program.statements:
-            lines.extend(self.compile_statement(stmt, 0))
-        return '\n'.join(lines) + ('\n' if lines else '')
-
-    def compile_statement(self, stmt: Stmt, indent: int) -> List[str]:
-        pad = ' ' * indent
-
-        if isinstance(stmt, Assign):
-            return [f"{pad}{stmt.name} = {self.compile_expr(stmt.value)}"]
-
-        if isinstance(stmt, Print):
-            return [f"{pad}print({self.compile_expr(stmt.expr)})"]
-
-        if isinstance(stmt, Return):
-            return [f"{pad}return {self.compile_expr(stmt.expr)}"]
-
-        if isinstance(stmt, Break):
-            return [f"{pad}break"]
-
-        if isinstance(stmt, Continue):
-            return [f"{pad}continue"]
-
-        if isinstance(stmt, If):
-            lines = [f"{pad}if {self.compile_expr(stmt.condition)}:"]
-            for inner in stmt.then_body:
-                lines.extend(self.compile_statement(inner, indent + 4))
-            if stmt.else_body is not None:
-                lines.append(f"{pad}else:")
-                for inner in stmt.else_body:
-                    lines.extend(self.compile_statement(inner, indent + 4))
-            return lines
-
-        if isinstance(stmt, While):
-            lines = [f"{pad}while {self.compile_expr(stmt.condition)}:"]
-            for inner in stmt.body:
-                lines.extend(self.compile_statement(inner, indent + 4))
-            return lines
-
-        if isinstance(stmt, For):
-            lines = [f"{pad}for {stmt.var} in range({self.compile_expr(stmt.start)}, {self.compile_expr(stmt.end)}, {self.compile_expr(stmt.step)}):"]
-            for inner in stmt.body:
-                lines.extend(self.compile_statement(inner, indent + 4))
-            return lines
-
-        if isinstance(stmt, FunctionDef):
-            params = ', '.join(stmt.params)
-            lines = [f"{pad}def {stmt.name}({params}):"]
-            for inner in stmt.body:
-                lines.extend(self.compile_statement(inner, indent + 4))
-            return lines
-
-        if isinstance(stmt, ExprStmt):
-            return [f"{pad}{self.compile_expr(stmt.expr)}"]
-
-        raise TrishulError(f"Unsupported statement for compiler: {type(stmt).__name__}")
-
-    def compile_expr(self, expr: Any) -> str:
-        if isinstance(expr, Literal):
-            if expr.value is True:
-                return 'True'
-            if expr.value is False:
-                return 'False'
-            if expr.value is None:
-                return 'None'
-            if isinstance(expr.value, str):
-                return repr(expr.value)
-            return str(expr.value)
-
-        if isinstance(expr, Name):
-            return expr.name
-
-        if isinstance(expr, Call):
-            args = ', '.join(self.compile_expr(arg) for arg in expr.args)
-            return f"{self.compile_expr(expr.callee)}({args})"
-
-        if isinstance(expr, Binary):
-            op = self.op_map.get(expr.op, expr.op)
-            return f"({self.compile_expr(expr.left)} {op} {self.compile_expr(expr.right)})"
-
-        if isinstance(expr, Unary):
-            return f"({expr.op}{self.compile_expr(expr.operand)})"
-
-        raise TrishulError(f"Unsupported expression for compiler: {type(expr).__name__}")
 
 
 def parse_source(source: str) -> Program:
@@ -757,56 +862,41 @@ def parse_source(source: str) -> Program:
     parser = Parser(tokens)
     program = parser.parse_program()
     if parser.current().type != "EOF":
-        raise TrishulError(f"Unexpected trailing tokens: {parser.current().type}")
+        raise TrishulError(f"Unexpected trailing tokens: {parser.current().type!r}")
     return program
 
 
-def run_file(path: str, max_iterations: int = 10000):
-    with open(path, 'r', encoding='utf-8') as fh:
+def run_script(path: str, output_path: Optional[str] = None, max_iterations: int = 10000):
+    with open(path, "r", encoding="utf-8") as fh:
         source = fh.read()
     program = parse_source(source)
-    interpreter = Interpreter(max_loop_iterations=max_iterations)
-    result = interpreter.execute_program(program)
-    return result
-
-
-def compile_file(input_path: str, output_path: Optional[str] = None):
-    with open(input_path, 'r', encoding='utf-8') as fh:
-        source = fh.read()
-    program = parse_source(source)
-    compiled = PythonCompiler().compile_program(program)
+    game_state = GameState()
+    interpreter = Interpreter(game_state, max_loop_iterations=max_iterations)
+    interpreter.execute_program(program)
     if output_path:
-        with open(output_path, 'w', encoding='utf-8') as fh:
-            fh.write(compiled)
-        return output_path
-    return compiled
+        game_state.export_json(output_path)
+    return game_state
 
 
 def build_cli() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description='Trishul — Hindi-inspired programming language with English script.')
-    subparsers = parser.add_subparsers(dest='command', required=True)
+    parser = argparse.ArgumentParser(description="Trishul game backend language")
+    subparsers = parser.add_subparsers(dest="command", required=True)
 
-    run_parser = subparsers.add_parser('run', help='Execute a Trishul source file.')
-    run_parser.add_argument('file', help='Path to the Trishul source file.')
-    run_parser.add_argument('--max-iterations', type=int, default=10000, help='Maximum loop iterations (default: 10000)')
-
-    compile_parser = subparsers.add_parser('compile', help='Compile Trishul source to Python.')
-    compile_parser.add_argument('file', help='Path to the Trishul source file.')
-    compile_parser.add_argument('-o', '--output', help='Optional output path for generated Python file.')
+    run_parser = subparsers.add_parser("run", help="Execute a Trishul game script")
+    run_parser.add_argument("file", help="Path to the Trishul script")
+    run_parser.add_argument("-o", "--output", help="Optional output JSON path")
+    run_parser.add_argument("--max-iterations", type=int, default=10000, help="Maximum loop iterations")
 
     return parser
 
 
 def main(argv=None):
     args = build_cli().parse_args(argv)
-
     try:
-        if args.command == 'run':
-            run_file(args.file, max_iterations=args.max_iterations)
-        elif args.command == 'compile':
-            out = compile_file(args.file, args.output)
-            if args.output is None:
-                print(out, end='')
+        if args.command == "run":
+            state = run_script(args.file, args.output, args.max_iterations)
+            if not args.output:
+                print(json.dumps({"entities": {k: v.to_dict() for k, v in state.entities.items()}, "events": [e.to_dict() for e in state.events]}, indent=2))
         else:
             raise TrishulError(f"Unknown command: {args.command}")
     except TrishulError as exc:
@@ -818,5 +908,5 @@ def main(argv=None):
     return 0
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     raise SystemExit(main())
