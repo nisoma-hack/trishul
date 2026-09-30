@@ -1,0 +1,21 @@
+kaam add(a, b) {
+    a + b wapis
+} khatam
+
+x ko 10 rakho
+y ko 20 rakho
+result ko add(x, y) rakho
+
+"Result: " likho
+result likho
+
+agar result > 25 to {
+    "Bada hai." likho
+} warna {
+    "Chhota hai." likho
+}
+
+jabtak x < 15 to {
+    x likho
+    x ko x + 1 rakho
+}
