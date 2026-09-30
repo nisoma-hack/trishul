@@ -1,0 +1,44 @@
+# NPC Behavior Script
+
+# Create NPC
+npc ko entity banao "merchant" { gold: 1000, mood: "happy", inventory_count: 15 } rakho
+
+# Add components
+component add_karo npc: Dialog { greeting: "Namaste, kya kharidoge?", farewell: "Phir milenge!" }
+component add_karo npc: Trade { sells: ["potion", "scroll", "staff"], buys: ["loot", "ore"] }
+
+# NPC daily routine
+jabtak time < 24 to {
+    # Morning: Open shop
+    agar time < 12 to {
+        state_badlo npc { mood: "energetic" }
+        likho "Shop is open!"
+    }
+    
+    # Afternoon: Normal business
+    agar time >= 12 aur time < 18 to {
+        state_badlo npc { mood: "neutral" }
+        likho "Serving customers..."
+    }
+    
+    # Evening: Close shop
+    agar time >= 18 to {
+        state_badlo npc { mood: "tired" }
+        likho "Shop closes soon."
+    }
+    
+    time ko time + 1 rakho
+}
+
+# Handle customer interaction
+customer_gold ko 200 rakho
+item_price ko 100 rakho
+
+agar customer_gold >= item_price to {
+    state_badlo npc { gold: 1100 }
+    action trigger_karo npc: sell_item { item: "potion", buyer: "player", price: 100 }
+    likho "Transaction complete!"
+} warna {
+    likho "Not enough gold!"
+    action trigger_karo npc: refuse_trade { reason: "insufficient_funds" }
+}
